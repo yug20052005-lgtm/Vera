@@ -30,6 +30,8 @@ from typing import Any, Literal
 
 from fastapi import FastAPI
 from pydantic import BaseModel
+from fastapi.responses import HTMLResponse
+from pydantic import BaseModel
 
 import composer
 import store
@@ -138,6 +140,9 @@ async def push_context(body: CtxBody):
 class TickBody(BaseModel):
     now: str
     available_triggers: list[str] = []
+
+class ChatRequest(BaseModel):
+    message: str
 
 
 @app.post("/v1/tick")
@@ -295,3 +300,35 @@ async def reply(body: ReplyBody):
 async def teardown():
     await store.kv_delete_all()
     return {"status": "wiped"}
+
+@app.get("/", response_class=HTMLResponse)
+def serve_catbox():
+    """Reads index.html from disk and sends it to the browser."""
+    try:
+        with open("index.html", "r", encoding="utf-8") as f:
+            return HTMLResponse(content=f.read())
+    except FileNotFoundError:
+        return HTMLResponse(
+            content="<h1>index.html not found!</h1><p>Make sure index.html is in the root directory alongside bot.py.</p>",
+            status_code=404
+        )
+
+
+@app.post("/api/chat")
+def chat_endpoint(req: ChatRequest):
+    """Feeds your prompt to composer.py and returns the response."""
+    import composer
+
+    # Pass the user's message into composer.py's reply engine
+    reply = composer.compose_reply(
+        category={"voice": {"tone_examples": []}},
+        merchant={"identity": {"owner_first_name": "Friend"}},
+        trigger={"suppression_key": "web_chat"},
+        customer=None,
+        conversation_so_far=[],
+        incoming_message=req.message,
+        auto_reply_repeat_count=0
+    )
+
+    # Return the AI body text to the frontend
+    return {"reply": reply.get("body", "I received your message!")}
