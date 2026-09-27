@@ -135,7 +135,7 @@ def _call_llm(user_payload: dict, is_reply: bool = False) -> dict:
     }
 
     payload = {
-        "model": "llama-3.1-8b-instant",
+        "model": "openai/gpt-oss-20b",
         "temperature": 0.0,
         "response_format": {"type": "json_object"},
         "messages": [
