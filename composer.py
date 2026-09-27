@@ -123,12 +123,13 @@ def compose_reply(
 
 
 def _call_llm(user_payload: dict, is_reply: bool = False) -> dict:
-    if not API_KEY:
-        return _fallback(user_payload, is_reply)
+    api_key = os.environ.get("LLM_API_KEY")
+    if not api_key:
+        return _fallback(user_payload, is_reply, error="No LLM_API_KEY set in Render Environment")
 
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {
-        "Authorization": f"Bearer {API_KEY}",
+        "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
     
@@ -158,7 +159,7 @@ def _fallback(user_payload: dict, is_reply: bool, error: str | None = None) -> d
     if is_reply:
         return {
             "action": "send",
-            "body": f"Confirmed, {name} — noted, and I'll have this sorted for you shortly.",
+            "body": f"AI Error: {error}" if error else "AI Error: LLM_API_KEY is missing!",
             "cta": "none",
             "rationale": f"LLM composer fallback ({error}); safe holding response.",
         }
