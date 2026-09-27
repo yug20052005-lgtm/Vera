@@ -131,11 +131,11 @@ def _call_llm(user_payload: dict, is_reply: bool = False) -> dict:
     headers = {
         "Authorization": f"Bearer {api_key.strip()}",
         "Content-Type": "application/json",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "User-Agent": "Mozilla/5.0",
     }
 
     payload = {
-        "model": MODEL,
+        "model": "llama-3.3-70b-versatile",
         "temperature": 0.0,
         "response_format": {"type": "json_object"},
         "messages": [
@@ -145,11 +145,15 @@ def _call_llm(user_payload: dict, is_reply: bool = False) -> dict:
     }
 
     try:
-        req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers)
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(url, data=data, headers=headers)
         with urllib.request.urlopen(req, timeout=30) as response:
             result = json.loads(response.read().decode("utf-8"))
             text = result["choices"][0]["message"]["content"].strip()
             return json.loads(text)
+    except urllib.error.HTTPError as e:
+        err_msg = e.read().decode("utf-8", errors="ignore")
+        return _fallback(user_payload, is_reply, error=f"Groq API {e.code}: {err_msg}")
     except Exception as e:
         return _fallback(user_payload, is_reply, error=str(e))
 
