@@ -1,25 +1,21 @@
 """
 composer.py — the actual "brain" of the bot.
 
-Everything here is prompt-engineering + light post-validation, not business
-logic. Business logic (context storage, suppression, auto-reply counting)
-lives in bot.py. This file's only job: given the 4 contexts (+ optional
-conversation history / reply text), produce a ComposedMessage dict.
-
-Deterministic: we call the LLM with temperature=0. Given the same inputs,
-you should get the same (or near-identical) output every time.
+Updated to use Groq's free OpenAI-compatible API via standard library urllib,
+avoiding extra dependencies or credit card requirements.
 """
 
 import json
 import os
-from anthropic import Anthropic
+import urllib.request
+import urllib.error
 
-MODEL = os.environ.get("LLM_MODEL", "claude-sonnet-4-5-20250929")
-_client = Anthropic(api_key=os.environ["LLM_API_KEY"]) if os.environ.get("LLM_API_KEY") else None
+# Free Groq model (high performance, zero cost)
+MODEL = os.environ.get("LLM_MODEL", "llama-3.3-70b-versatile")
+API_KEY = os.environ.get("LLM_API_KEY")
 
 # ----------------------------------------------------------------------
 # System prompt — this is the bot's entire "understanding" of the task.
-# Distilled from challenge-brief.md §§4-11 + the 10 case studies.
 # ----------------------------------------------------------------------
 SYSTEM_PROMPT = """You are Vera, magicpin's AI assistant that messages merchants (and
 sometimes their customers) on WhatsApp. You compose ONE message at a time from four
@@ -70,17 +66,10 @@ OUTPUT FORMAT: reply with ONLY a JSON object, no markdown fences, no commentary:
 
 
 def _trim(ctx: dict | None, keys: list[str] | None = None) -> dict | None:
-    """Send the whole context — the judge pushes full payloads and we want
-    the model grounded in everything available. No trimming needed at this
-    dataset size (single-digit KB per context)."""
     return ctx
 
 
 def compose(category: dict, merchant: dict, trigger: dict, customer: dict | None = None) -> dict:
-    """
-    The core composition entrypoint — mirrors the challenge-brief.md §5 signature.
-    Returns a dict with keys: body, cta, send_as, suppression_key, rationale.
-    """
     user_payload = {
         "category": _trim(category),
         "merchant": _trim(merchant),
@@ -100,27 +89,16 @@ def compose_reply(
     incoming_message: str,
     auto_reply_repeat_count: int,
 ) -> dict:
-    """
-    Used by /v1/reply. Given the conversation state + the latest inbound message,
-    decide: send / wait / end.
-
-    auto_reply_repeat_count: how many times in a row this EXACT message text has
-    been seen in this conversation (computed by bot.py, since that's plain string
-    matching — no need to burn an LLM call on it).
-    """
-    # Hard rule, no LLM needed: 3rd identical auto-reply in a row -> end.
     if auto_reply_repeat_count >= 3:
         return {
             "action": "end",
-            "rationale": "Same message received 3x in a row — auto-reply loop with no real "
-            "engagement signal. Closing to avoid wasting turns.",
+            "rationale": "Same message received 3x in a row — auto-reply loop with no real engagement signal. Closing to avoid wasting turns.",
         }
     if auto_reply_repeat_count == 2:
         return {
             "action": "wait",
             "wait_seconds": 86400,
-            "rationale": "Same auto-reply twice in a row — owner likely not checking phone. "
-            "Backing off 24h before retrying.",
+            "rationale": "Same auto-reply twice in a row — owner likely not checking phone. Backing off 24h before retrying.",
         }
 
     user_payload = {
@@ -133,51 +111,48 @@ def compose_reply(
         "task": (
             "The merchant/customer just sent the incoming_message above. Decide your next move.\n"
             "- If they showed explicit intent/agreement ('yes', 'let's do it', 'ok go ahead'), "
-            "respond with action=send and move straight to action-mode — do NOT ask another "
-            "qualifying question.\n"
-            "- If they're hostile, said 'stop', or clearly not interested, respond with "
-            "action=end (optionally one short polite exit line first via action=send, then end "
-            "on the next turn).\n"
-            "- If they asked a genuine question or engaged normally, respond with action=send "
-            "and the next best message.\n"
-            "- If off-topic (e.g. asks something unrelated like GST filing help), politely "
-            "redirect to your mission in one line, action=send.\n"
+            "respond with action=send and move straight to action-mode — do NOT ask another qualifying question.\n"
+            "- If they're hostile, said 'stop', or clearly not interested, respond with action=end.\n"
+            "- If they asked a genuine question or engaged normally, respond with action=send and the next best message.\n"
+            "- If off-topic, politely redirect to your mission in one line, action=send.\n"
             "Reply with ONLY a JSON object: "
-            '{"action": "send"|"wait"|"end", "body": "...", "cta": "...", '
-            '"wait_seconds": <int, only if action=wait>, "rationale": "..."}'
+            '{"action": "send"|"wait"|"end", "body": "...", "cta": "...", "rationale": "..."}'
         ),
     }
     return _call_llm(user_payload, is_reply=True)
 
 
 def _call_llm(user_payload: dict, is_reply: bool = False) -> dict:
-    if _client is None:
-        # No API key configured — deterministic fallback so the bot never 500s.
+    if not API_KEY:
         return _fallback(user_payload, is_reply)
 
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {API_KEY}",
+        "Content-Type": "application/json",
+    }
+    
+    payload = {
+        "model": MODEL,
+        "temperature": 0.0,
+        "response_format": {"type": "json_object"},
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
+        ],
+    }
+
     try:
-        resp = _client.messages.create(
-            model=MODEL,
-            max_tokens=600,
-            temperature=0,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)}],
-        )
-        text = resp.content[0].text.strip()
-        # Strip accidental markdown fences
-        if text.startswith("```"):
-            text = text.strip("`")
-            if text.startswith("json"):
-                text = text[4:]
-        return json.loads(text)
+        req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers)
+        with urllib.request.urlopen(req, timeout=30) as response:
+            result = json.loads(response.read().decode("utf-8"))
+            text = result["choices"][0]["message"]["content"].strip()
+            return json.loads(text)
     except Exception as e:
         return _fallback(user_payload, is_reply, error=str(e))
 
 
 def _fallback(user_payload: dict, is_reply: bool, error: str | None = None) -> dict:
-    """Never let a malformed/failed LLM call produce an empty response — the
-    judge scores malformed JSON as 0 with a -2 penalty, which is strictly
-    worse than a plain, honest, low-scoring-but-valid message."""
     merchant = user_payload.get("merchant") or {}
     name = (merchant.get("identity") or {}).get("owner_first_name", "there")
     if is_reply:
@@ -185,7 +160,7 @@ def _fallback(user_payload: dict, is_reply: bool, error: str | None = None) -> d
             "action": "send",
             "body": f"Confirmed, {name} — noted, and I'll have this sorted for you shortly.",
             "cta": "none",
-            "rationale": f"LLM composer unavailable ({error}); safe holding response.",
+            "rationale": f"LLM composer fallback ({error}); safe holding response.",
         }
     trigger = user_payload.get("trigger") or {}
     return {
@@ -193,5 +168,5 @@ def _fallback(user_payload: dict, is_reply: bool, error: str | None = None) -> d
         "cta": "open_ended",
         "send_as": "vera",
         "suppression_key": trigger.get("suppression_key", "fallback"),
-        "rationale": f"LLM composer unavailable ({error}); generic fallback used.",
+        "rationale": f"LLM composer fallback ({error}); generic fallback used.",
     }
