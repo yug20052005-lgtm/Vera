@@ -128,9 +128,10 @@ def _call_llm(user_payload: dict, is_reply: bool = False) -> dict:
         return _fallback(user_payload, is_reply, error="No LLM_API_KEY set in Render Environment")
 
     url = "https://api.groq.com/openai/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {api_key}",
+   headers = {
+        "Authorization": f"Bearer {api_key.strip()}",
         "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
     }
     
     payload = {
